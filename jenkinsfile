@@ -1,0 +1,120 @@
+pipeline {
+    agent any
+   environment {
+    AWS_ACCOUNT_ID = "892390828978"                  
+    AWS_REGION     = "us-east-1"                    // Mumbai region
+    ECR_REPO       = "public.ecr.aws/b1r2z2z2/secure-flask-app"              // your repo name
+    IMAGE_TAG      = "${BUILD_NUMBER}"
+    IMAGE_NAME     = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
+    GITOPS_REPO    = "https://github.com/yourusername/gitops-repo.git"
+    GITOPS_PATH    = "gitops-repo/flask-app/flask-chart"
+    SCANNER_HOME   = tool 'sonarqube-scanner'
+}
+    stages {
+        stage('Checkout Code') {
+            steps {
+                git branch: 'main', url: 'https://github.com/yourusername/secure-flask-app.git'
+            }
+        }
+        stage('Install Dependencies') {
+            steps {
+                sh '''
+                python3 -m venv venv
+                . venv/bin/activate
+                pip install --upgrade pip
+                pip install -r requirements.txt
+                '''
+            }
+        }
+        stage('Run Unit Tests') {
+            steps {
+                sh '''
+                . venv/bin/activate
+                pytest test_app.py
+                '''
+            }
+        }
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonarqube-server') {
+                    sh '''
+                    $SCANNER_HOME/bin/sonar-scanner \
+                      -Dsonar.projectKey=secure-flask-app \
+                      -Dsonar.projectName=secure-flask-app \
+                      -Dsonar.sources=. \
+                      -Dsonar.python.version=3.10
+                    '''
+                }
+            }
+        }
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+        stage('OWASP Dependency Check') {
+            steps {
+                dependencyCheck additionalArguments: '--scan . --format XML --format HTML --failOnCVSS 7', odcInstallation: 'dependency-check'
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+        stage('Build Docker Image') {
+            steps {
+                sh 'docker build -t $IMAGE_NAME:$IMAGE_TAG .'
+            }
+        }
+        stage('Trivy FileSystem Scan') {
+            steps {
+                sh '''
+                trivy fs --exit-code 0 --severity LOW,MEDIUM,HIGH .
+                '''
+            }
+        }
+        stage('Trivy Image Scan') {
+            steps {
+                sh '''
+                trivy image --exit-code 1 --severity HIGH,CRITICAL $IMAGE_NAME:$IMAGE_TAG
+                '''
+            }
+        }
+        stage('Push Docker Image') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    sh '''
+                    echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
+                    docker push $IMAGE_NAME:$IMAGE_TAG
+                    '''
+                }
+            }
+        }
+        stage('Update GitOps Repo') {
+            steps {
+                withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
+                    sh '''
+                    rm -rf gitops-repo
+                    git clone https://${GITHUB_TOKEN}@github.com/yourusername/gitops-repo.git
+                    cd ${GITOPS_PATH}
+                    sed -i "s/tag: \\".*\\"/tag: \\"${IMAGE_TAG}\\"/g" values.yaml
+                    git config user.email "jenkins@example.com"
+                    git config user.name "jenkins"
+                    git add values.yaml
+                    git commit -m "Update image tag to ${IMAGE_TAG}"
+                    git push origin main
+                    '''
+                }
+            }
+        }
+    }
+    post {
+        success {
+            echo 'Secure CI/CD pipeline completed successfully!'
+        }
+        failure {
+            echo 'Pipeline failed due to quality/security gate.'
+        }
+    }
+
+}
+ 
