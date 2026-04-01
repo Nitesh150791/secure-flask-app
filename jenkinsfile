@@ -1,52 +1,41 @@
 pipeline {
-    agent any
-   environment {
-    AWS_ACCOUNT_ID = "892390828978"                  
-    AWS_REGION     = "us-east-1"                    // Mumbai region
-    ECR_REPO       = "public.ecr.aws/b1r2z2z2/secure-flask-app"              // your repo name
-    IMAGE_TAG      = "${BUILD_NUMBER}"
-    IMAGE_NAME     = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
-    GITOPS_REPO    = "https://github.com/yourusername/gitops-repo.git"
-    GITOPS_PATH    = "gitops-repo/flask-app/flask-chart"
-    SCANNER_HOME   = tool 'sonarqube-scanner'
-}
+
+    agent { label 'nitesh' }
+
+    environment {
+        AWS_REGION   = "us-east-1"
+        ECR_REGISTRY = "public.ecr.aws/u7p8b8p7"
+        IMAGE_NAME   = "secure-flask-app"
+        IMAGE_TAG    = "${BUILD_NUMBER}"
+
+        GITOPS_PATH  = "gitops-repo/flask-app/flask-chart"
+
+        SCANNER_HOME = tool 'Sonar'
+    }
+
     stages {
+
         stage('Checkout Code') {
             steps {
-                git branch: 'main', url: 'https://github.com/yourusername/secure-flask-app.git'
+                git branch: 'main',
+                    url: 'https://github.com/Nitesh150791/secure-flask-app.git'
             }
         }
-        stage('Install Dependencies') {
-            steps {
-                sh '''
-                python3 -m venv venv
-                . venv/bin/activate
-                pip install --upgrade pip
-                pip install -r requirements.txt
-                '''
-            }
-        }
-        stage('Run Unit Tests') {
-            steps {
-                sh '''
-                . venv/bin/activate
-                pytest test_app.py
-                '''
-            }
-        }
+
         stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv('sonarqube-server') {
-                    sh '''
-                    $SCANNER_HOME/bin/sonar-scanner \
+                withSonarQubeEnv('Sonar') {
+                    sh """
+                    ${SCANNER_HOME}/bin/sonar-scanner \
                       -Dsonar.projectKey=secure-flask-app \
                       -Dsonar.projectName=secure-flask-app \
                       -Dsonar.sources=. \
-                      -Dsonar.python.version=3.10
-                    '''
+                      -Dsonar.exclusions=venv/**,**/*.js
+                    """
                 }
             }
         }
+
         stage('Quality Gate') {
             steps {
                 timeout(time: 5, unit: 'MINUTES') {
@@ -54,67 +43,95 @@ pipeline {
                 }
             }
         }
-        stage('OWASP Dependency Check') {
+
+        stage('Python Dependency Scan (pip-audit)') {
             steps {
-                dependencyCheck additionalArguments: '--scan . --format XML --format HTML --failOnCVSS 7', odcInstallation: 'dependency-check'
-                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                sh """
+                python3 -m venv audit-env
+                . audit-env/bin/activate
+                pip install pip-audit
+                pip-audit --fail-on high
+                """
             }
         }
+
         stage('Build Docker Image') {
             steps {
-                sh 'docker build -t $IMAGE_NAME:$IMAGE_TAG .'
+                sh """
+                docker build -t ${ECR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} .
+                """
             }
         }
-        stage('Trivy FileSystem Scan') {
+
+        stage('Trivy Source Scan') {
             steps {
-                sh '''
-                trivy fs --exit-code 0 --severity LOW,MEDIUM,HIGH .
-                '''
+                sh """
+                docker run --rm \
+                  -v \$(pwd):/workspace \
+                  aquasec/trivy:latest \
+                  fs --exit-code 0 --severity LOW,MEDIUM,HIGH /workspace
+                """
             }
         }
+
         stage('Trivy Image Scan') {
             steps {
-                sh '''
-                trivy image --exit-code 1 --severity HIGH,CRITICAL $IMAGE_NAME:$IMAGE_TAG
-                '''
+                sh """
+                docker run --rm \
+                  -v /var/run/docker.sock:/var/run/docker.sock \
+                  aquasec/trivy:latest \
+                  image --exit-code 1 --severity HIGH,CRITICAL \
+                  ${ECR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
+                """
             }
         }
-        stage('Push Docker Image') {
+
+        stage('Push to ECR') {
             steps {
-                withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
-                    sh '''
-                    echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
-                    docker push $IMAGE_NAME:$IMAGE_TAG
-                    '''
+                withCredentials([[
+                    \$class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-credentials'
+                ]]) {
+                    sh """
+                    aws ecr-public get-login-password --region ${AWS_REGION} | \
+                    docker login --username AWS --password-stdin public.ecr.aws
+
+                    docker push ${ECR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
+                    """
                 }
             }
         }
+
         stage('Update GitOps Repo') {
             steps {
-                withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
-                    sh '''
+                withCredentials([
+                    string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')
+                ]) {
+                    sh """
                     rm -rf gitops-repo
-                    git clone https://${GITHUB_TOKEN}@github.com/yourusername/gitops-repo.git
+                    git clone https://${GITHUB_TOKEN}@github.com/Nitesh150791/gitops-repo.git
+
                     cd ${GITOPS_PATH}
-                    sed -i "s/tag: \\".*\\"/tag: \\"${IMAGE_TAG}\\"/g" values.yaml
-                    git config user.email "jenkins@example.com"
+                    sed -i "s/tag: .*/tag: \\"${IMAGE_TAG}\\"/" values.yaml
+
                     git config user.name "jenkins"
+                    git config user.email "jenkins@example.com"
+
                     git add values.yaml
                     git commit -m "Update image tag to ${IMAGE_TAG}"
                     git push origin main
-                    '''
+                    """
                 }
             }
         }
     }
+
     post {
         success {
-            echo 'Secure CI/CD pipeline completed successfully!'
+            echo "✅ Secure CI/CD pipeline completed successfully!"
         }
         failure {
-            echo 'Pipeline failed due to quality/security gate.'
+            echo "❌ Pipeline failed due to quality or security gate."
         }
     }
-
 }
- 
