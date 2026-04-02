@@ -5,7 +5,7 @@ app = Flask(__name__)
 @app.route("/")
 
 def home():
-    return "Hello from Secure CICD pipeline ArgocCD & jenkins"
+    return "Hello from Secure CICD pipeline ArgocCD & jenkins & terraform"
 
 @app.route("/health")
 def health():
