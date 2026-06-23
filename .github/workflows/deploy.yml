@@ -30,5 +30,9 @@ jobs:
       - name: Run Gitleaks
         uses: gitleaks/gitleaks-action@v2
       
+      - name: Install pip-audit
+        run: pip install pip-audit
+        
+      
       - name: Run pip-audit
         run: pip-audit
