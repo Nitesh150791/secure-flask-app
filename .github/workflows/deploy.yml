@@ -28,7 +28,7 @@ jobs:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
       
       - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@v8
+        uses: gitleaks/gitleaks-action@v2
       
       - name: Run pip-audit
         run: pip-audit
